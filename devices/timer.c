@@ -103,7 +103,7 @@ timer_sleep (int64_t ticks)
 
   struct thread *current_thread = thread_current();
   enum intr_level old_level = intr_disable(); // Disable interrupts for safety
-
+  ASSERT(intr_get_level() == INTR_OFF);
   // Set the wakeup time for the thread and add it to the sleep list
   current_thread->wakeup_time = start + ticks;
   list_insert_ordered(&sleep_list, &current_thread->elem, wakeup_time_less, NULL);
@@ -203,6 +203,10 @@ timer_interrupt (struct intr_frame *args UNUSED)
   wakeup_sleeping_threads();
 }
 bool wakeup_time_less(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+  if(a==NULL || b==NULL){
+    return false; //if either is NULL, we cant compare properly
+  }
+
   struct thread *t_a = list_entry(a, struct thread, elem);
   struct thread *t_b = list_entry(b, struct thread, elem);
   return t_a->wakeup_time < t_b->wakeup_time;
