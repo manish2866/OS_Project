@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -90,7 +91,15 @@ struct thread
     int64_t wakeup_time;
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
+        /* Alarm clock. */
+    int64_t wake_tick;                /* Storing local tick to wakeup */
+    struct semaphore sema;        /* Semaphore. */
 
+    int original_priority;              /* Stores the original priority of the thread */
+    struct list donors;                 /* Stores list of threads donating priority to us */
+    struct list_elem donor_elem;        /* list element in donors list. */
+    struct thread *donee;               /* pointer to store the thrtead we are donating priority to */
+    struct lock *req_lock; 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
@@ -126,6 +135,10 @@ const char *thread_name (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
+void yield_to_high_priority_thread (void);
+void donate_thread_priority (struct thread *);
+bool compare_thread_priority (const struct list_elem *, const struct list_elem *,
+                            void *aux);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func (struct thread *t, void *aux);
@@ -138,5 +151,6 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+struct thread* find_max_priority_thread(struct list *thread_list);
 
 #endif /* threads/thread.h */

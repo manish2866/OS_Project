@@ -93,6 +93,7 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
 
+
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -138,7 +139,6 @@ thread_tick (void)
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
 }
-
 /* Prints thread statistics. */
 void
 thread_print_stats (void) 
@@ -200,6 +200,8 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
+  if (priority > thread_get_priority ())
+    thread_yield ();
 
   return tid;
 }
@@ -218,6 +220,17 @@ thread_block (void)
 
   thread_current ()->status = THREAD_BLOCKED;
   schedule ();
+}
+/* Compare the priorities of the two threads */
+bool
+compare_thread_priority (const struct list_elem *a,
+                        const struct list_elem *b,
+                        void *aux UNUSED) 
+{
+  const struct thread *first = list_entry (a, struct thread, elem);
+  const struct thread *second = list_entry (b, struct thread, elem);
+
+  return first->priority < second->priority;
 }
 
 /* Transitions a blocked thread T to the ready-to-run state.
@@ -331,11 +344,16 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
-void
-thread_set_priority (int new_priority) 
+// Sets the current thread's priority to given priority.
+void thread_set_priority(int priority)
 {
-  thread_current ()->priority = new_priority;
+  struct thread *curr_thread = thread_current();
+  curr_thread->original_priority = priority;
+  enum intr_level old_level = intr_disable ();
+  donate_thread_priority (thread_current());
+  yield_to_high_priority_thread();
+  intr_set_level (old_level);
+
 }
 
 /* Returns the current thread's priority. */
@@ -349,7 +367,6 @@ thread_get_priority (void)
 void
 thread_set_nice (int nice UNUSED) 
 {
-  /* Not yet implemented. */
 }
 
 /* Returns the current thread's nice value. */
@@ -374,6 +391,90 @@ thread_get_recent_cpu (void)
 {
   /* Not yet implemented. */
   return 0;
+}
+
+// Compares the priorities of two threads. Returns true if first thread has lower priority than second thread in donars_list,
+static bool
+compare_donated_priority (const struct list_elem *a,
+                        const struct list_elem *b,
+                        void *aux UNUSED) 
+{
+  const struct thread *first = list_entry (a, struct thread, donor_elem);
+  const struct thread *second = list_entry (b, struct thread, donor_elem);
+
+  return first->priority < second->priority;
+}
+
+void update_thread_priority(struct thread *t);
+// Helper function to update the priority of a thread based on donations
+void update_thread_priority(struct thread *t)
+{
+    if (t == NULL) {
+        return;
+    }
+
+    // Determine the maximum donation from donors list
+    int max_donation = PRI_MIN;
+    if (!list_empty(&t->donors)) {
+        struct thread *donor = list_entry(list_max(&t->donors, compare_donated_priority, NULL),
+                                          struct thread, donor_elem);
+        max_donation = donor->priority;
+    }
+
+    // Set the thread's priority to the higher of its own priority or the donation
+    if (max_donation > t->original_priority) {
+        t->priority = max_donation;
+    } else {
+        t->priority = t->original_priority;
+    }
+}
+
+// Main function refactored to use iteration instead of recursion
+void donate_thread_priority(struct thread *t)
+{
+    while (t != NULL) {
+        // Update the priority of the current thread
+        int old_priority = t->priority;
+        update_thread_priority(t);
+
+        // If the priority hasn't increased or there is no donee, stop the loop
+        if (t->priority <= old_priority || t->donee == NULL) {
+            break;
+        }
+
+        // Move to the next donee in the chain
+        t = t->donee;
+    }
+}
+
+void yield_to_high_priority_thread (void)
+{
+  enum intr_level old_level = intr_disable();
+  if (!list_empty (&ready_list)) 
+    {
+      struct thread *current_thread = thread_current ();
+      struct thread *max_priority_thread = find_max_priority_thread(&ready_list);
+      if (max_priority_thread->priority > current_thread->priority)
+        {
+          if (intr_context ())
+            intr_yield_on_return ();
+          else
+            thread_yield (); 
+        }
+    }
+  intr_set_level (old_level);
+}
+
+// Returns the thread with the highest priority from the given list.
+struct thread* find_max_priority_thread(struct list *thread_list) 
+{
+  ASSERT (!list_empty(thread_list));
+
+  // Use list_max to find the element with the highest priority.
+  struct list_elem *tl_elem = list_max(thread_list, compare_thread_priority, NULL);
+  struct thread *max_priority_thread = list_entry(tl_elem, struct thread, elem);
+  
+  return max_priority_thread;
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -461,8 +562,10 @@ init_thread (struct thread *t, const char *name, int priority)
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
-  t->priority = priority;
+  t->priority = t->original_priority = priority;
   t->magic = THREAD_MAGIC;
+  sema_init (&t->sema, 0);
+  list_init (&t->donors);
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
@@ -493,7 +596,14 @@ next_thread_to_run (void)
   if (list_empty (&ready_list))
     return idle_thread;
   else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+    {
+      // Find the thread having maximum priority in the ready_list
+      struct thread *max_priority_thread = find_max_priority_thread(&ready_list);
+      // remove the thread from the ready_list
+      list_remove (&max_priority_thread->elem);
+      // return the hiher-priority thread as the next thread to be run
+      return max_priority_thread;
+    }
 }
 
 /* Completes a thread switch by activating the new thread's page
